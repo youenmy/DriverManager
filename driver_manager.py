@@ -145,6 +145,65 @@ try {
     return out
 
 
+def get_printer_drivers() -> list[dict]:
+    """Printer drivers via Get-PrinterDriver (catches Kyocera, HP, Canon etc)."""
+    script = r"""
+try {
+    $drivers = Get-PrinterDriver -ErrorAction Stop |
+        Select-Object Name, Manufacturer, DriverVersion, InfPath,
+                      MajorVersion, PrinterEnvironment
+    $json = ConvertTo-Json -InputObject @($drivers) -Depth 2 -Compress
+    if ([string]::IsNullOrEmpty($json)) { Write-Output "[]" } else { Write-Output $json }
+} catch {
+    Write-Output "[]"
+}
+"""
+    raw = _run_ps(script) or "[]"
+    try:
+        rows = json.loads(raw)
+        if not isinstance(rows, list):
+            rows = [rows]
+    except Exception:
+        rows = []
+
+    out = []
+    seen = set()
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        inf_path = (r.get("InfPath") or "").strip()
+        inf_name = os.path.basename(inf_path) if inf_path else ""
+
+        # Driver version is a packed 64-bit int in WMI
+        version = r.get("DriverVersion")
+        if isinstance(version, (int, float)) and version:
+            v = int(version)
+            version = (f"{(v >> 48) & 0xFFFF}.{(v >> 32) & 0xFFFF}."
+                       f"{(v >> 16) & 0xFFFF}.{v & 0xFFFF}")
+        elif version is None:
+            version = ""
+
+        env = (r.get("PrinterEnvironment") or "").strip()
+        name = (r.get("Name") or "").strip()
+        # dedupe by (name, inf)
+        key = (name.lower(), inf_name.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+
+        out.append({
+            "driver_type": "Принтер",
+            "name": name,
+            "inf": inf_name,
+            "version": str(version).strip(),
+            "date": "",
+            "provider": (r.get("Manufacturer") or "").strip(),
+            "class": f"Printer ({env})" if env else "Printer",
+            "path": inf_path,
+        })
+    return out
+
+
 def get_system_drivers() -> list[dict]:
     """System (kernel) drivers via Win32_SystemDriver."""
     script = r"""
@@ -204,12 +263,15 @@ ACCENT  = "#2563eb"
 ACCENT2 = "#1d4ed8"
 DANGER  = "#dc2626"
 DANGER2 = "#b91c1c"
+PRINT   = "#7c3aed"
 TEXT    = "#0f172a"
 MUTED   = "#64748b"
 ROW_OEM = "#eff6ff"
 ROW_SYS = "#f8fafc"
+ROW_PRN = "#faf5ff"
 ROW_OEM_ALT = "#ffffff"
 ROW_SYS_ALT = "#ffffff"
+ROW_PRN_ALT = "#ffffff"
 
 
 class DriverManagerApp:
@@ -329,12 +391,19 @@ class DriverManagerApp:
         bar = ttk.Frame(self.root, padding=(14, 4, 14, 8))
         bar.pack(fill=tk.X)
 
-        ttk.Button(bar, text="📤  Экспорт выбранных",
-                   style="Accent.TButton",
-                   command=self._action_export).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(bar, text="📥  Импорт из папки",
-                   style="Danger.TButton",
-                   command=self._action_import).pack(side=tk.LEFT, padx=(0, 6))
+        # tk.Button (not ttk) — vista theme ignores bg on ttk.Button
+        tk.Button(bar, text="  📤  Экспорт выбранных  ",
+                  bg=ACCENT, fg="white",
+                  activebackground=ACCENT2, activeforeground="white",
+                  relief="flat", bd=0, cursor="hand2",
+                  font=("Segoe UI Semibold", 9), padx=4, pady=7,
+                  command=self._action_export).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(bar, text="  📥  Импорт из папки  ",
+                  bg=DANGER, fg="white",
+                  activebackground=DANGER2, activeforeground="white",
+                  relief="flat", bd=0, cursor="hand2",
+                  font=("Segoe UI Semibold", 9), padx=4, pady=7,
+                  command=self._action_import).pack(side=tk.LEFT, padx=(0, 6))
 
         ttk.Separator(bar, orient=tk.VERTICAL).pack(
             side=tk.LEFT, fill=tk.Y, padx=8, pady=3)
@@ -359,11 +428,15 @@ class DriverManagerApp:
 
         self._show_oem = tk.BooleanVar(value=True)
         self._show_sys = tk.BooleanVar(value=True)
+        self._show_prn = tk.BooleanVar(value=True)
         ttk.Checkbutton(fstrip, text="OEM (установленные)",
                         variable=self._show_oem,
                         command=self._filter).pack(side=tk.LEFT, padx=4)
         ttk.Checkbutton(fstrip, text="Системные",
                         variable=self._show_sys,
+                        command=self._filter).pack(side=tk.LEFT, padx=4)
+        ttk.Checkbutton(fstrip, text="Принтеры",
+                        variable=self._show_prn,
                         command=self._filter).pack(side=tk.LEFT, padx=4)
 
         ttk.Separator(fstrip, orient=tk.VERTICAL).pack(
@@ -413,6 +486,8 @@ class DriverManagerApp:
         self._tree.tag_configure("oem2", background=ROW_OEM_ALT)
         self._tree.tag_configure("sys",  background=ROW_SYS)
         self._tree.tag_configure("sys2", background=ROW_SYS_ALT)
+        self._tree.tag_configure("prn",  background=ROW_PRN)
+        self._tree.tag_configure("prn2", background=ROW_PRN_ALT)
 
         # ── Context menu ───────────────────────────────────────────────────
         self._ctx = tk.Menu(self.root, tearoff=0,
@@ -459,15 +534,17 @@ class DriverManagerApp:
     def _load_thread(self):
         oem = get_oem_drivers()
         sys_d = get_system_drivers()
+        prn = get_printer_drivers()
 
         # Retry once if everything is empty — WMI first-call hiccup
-        if not oem and not sys_d:
+        if not oem and not sys_d and not prn:
             import time
             time.sleep(0.4)
             oem = get_oem_drivers()
             sys_d = get_system_drivers()
+            prn = get_printer_drivers()
 
-        self._all_drivers = oem + sys_d
+        self._all_drivers = oem + prn + sys_d
         self.root.after(0, self._populate_done)
 
     def _populate_done(self):
@@ -482,13 +559,16 @@ class DriverManagerApp:
         show_oem = self._show_oem.get()
         show_sys = self._show_sys.get()
 
+        show_prn = self._show_prn.get()
         shown = 0
-        oem_i = sys_i = 0
+        oem_i = sys_i = prn_i = 0
         for d in self._all_drivers:
             dtype = d["driver_type"]
             if dtype == "OEM" and not show_oem:
                 continue
             if dtype == "Системный" and not show_sys:
+                continue
+            if dtype == "Принтер" and not show_prn:
                 continue
 
             hay = " ".join(str(d.get(k, "")) for k in
@@ -499,6 +579,9 @@ class DriverManagerApp:
             if dtype == "OEM":
                 tag = "oem" if oem_i % 2 == 0 else "oem2"
                 oem_i += 1
+            elif dtype == "Принтер":
+                tag = "prn" if prn_i % 2 == 0 else "prn2"
+                prn_i += 1
             else:
                 tag = "sys" if sys_i % 2 == 0 else "sys2"
                 sys_i += 1
@@ -517,8 +600,10 @@ class DriverManagerApp:
 
         total_oem = sum(1 for d in self._all_drivers if d["driver_type"] == "OEM")
         total_sys = sum(1 for d in self._all_drivers if d["driver_type"] == "Системный")
+        total_prn = sum(1 for d in self._all_drivers if d["driver_type"] == "Принтер")
         self._counts_lbl.configure(
-            text=f"OEM: {total_oem}   •   Системных: {total_sys}   •   Показано: {shown}")
+            text=f"OEM: {total_oem}   •   Принтеров: {total_prn}   •   "
+                 f"Системных: {total_sys}   •   Показано: {shown}")
 
         if not self._all_drivers:
             self._set_status("⚠ Не удалось получить список драйверов. Нажмите «Обновить».")
@@ -601,14 +686,14 @@ class DriverManagerApp:
         if not sel:
             return
 
-        oem_sel = [iid for iid in sel
-                   if self._tree.item(iid, "values")[0] == "OEM"]
-        non_oem = len(sel) - len(oem_sel)
+        deletable = [iid for iid in sel
+                     if self._tree.item(iid, "values")[0] in ("OEM", "Принтер")]
+        non_del = len(sel) - len(deletable)
 
-        if not oem_sel:
+        if not deletable:
             messagebox.showwarning(
-                "Только OEM",
-                "Удалять можно только OEM-драйверы (сторонние).\n"
+                "Только OEM и принтеры",
+                "Удалять можно только OEM-драйверы и драйверы принтеров.\n"
                 "Системные драйверы трогать нельзя.")
             return
 
@@ -621,47 +706,57 @@ class DriverManagerApp:
             return
 
         names = "\n".join("• " + self._tree.item(i, "values")[1]
-                          for i in oem_sel[:8])
-        if len(oem_sel) > 8:
-            names += f"\n… и ещё {len(oem_sel) - 8}"
+                          for i in deletable[:8])
+        if len(deletable) > 8:
+            names += f"\n… и ещё {len(deletable) - 8}"
 
-        extra = f"\n\n(Пропущено системных: {non_oem})" if non_oem else ""
+        extra = f"\n\n(Пропущено системных: {non_del})" if non_del else ""
 
         if not messagebox.askyesno(
             "Подтверждение удаления",
-            f"Удалить {len(oem_sel)} драйвер(ов)?\n\n{names}{extra}\n\n"
+            f"Удалить {len(deletable)} драйвер(ов)?\n\n{names}{extra}\n\n"
             "Операция необратима — драйверы будут удалены из системы."):
             return
 
         self._set_status("Удаление драйверов…")
         threading.Thread(
-            target=self._delete_thread, args=(oem_sel,), daemon=True).start()
+            target=self._delete_thread, args=(deletable,), daemon=True).start()
 
     def _delete_thread(self, iids: list):
         ok, fail = 0, 0
         errors: list[str] = []
         for iid in iids:
             vals = self._tree.item(iid, "values")
-            inf = vals[2]
-            name = vals[1]
-            if not inf:
-                fail += 1
-                errors.append(f"{name}: нет INF имени")
-                continue
+            dtype, name, inf = vals[0], vals[1], vals[2]
             try:
-                r = _run_cmd(
-                    ["pnputil.exe", "/delete-driver", inf, "/uninstall", "/force"],
-                    timeout=120,
-                )
-                if r.returncode == 0:
-                    ok += 1
+                if dtype == "Принтер":
+                    # Remove printer driver via PS cmdlet
+                    escaped = name.replace("'", "''")
+                    script = (f"Remove-PrinterDriver -Name '{escaped}' "
+                              f"-ErrorAction Stop; Write-Output 'OK'")
+                    out = _run_ps(script, timeout=60)
+                    if out.strip().endswith("OK"):
+                        ok += 1
+                    else:
+                        fail += 1
+                        errors.append(f"{name}: {out.splitlines()[0] if out else 'ошибка'}")
                 else:
-                    fail += 1
-                    msg = (r.stderr or r.stdout or "").strip().splitlines()
-                    errors.append(f"{inf}: {msg[0] if msg else 'ошибка'}")
+                    if not inf:
+                        fail += 1
+                        errors.append(f"{name}: нет INF имени")
+                        continue
+                    r = _run_cmd(
+                        ["pnputil.exe", "/delete-driver", inf, "/uninstall", "/force"],
+                        timeout=120)
+                    if r.returncode == 0:
+                        ok += 1
+                    else:
+                        fail += 1
+                        msg = (r.stderr or r.stdout or "").strip().splitlines()
+                        errors.append(f"{inf}: {msg[0] if msg else 'ошибка'}")
             except Exception as exc:
                 fail += 1
-                errors.append(f"{inf}: {exc}")
+                errors.append(f"{name}: {exc}")
 
         text = f"Удалено: {ok}\nОшибок: {fail}"
         if errors:
@@ -681,12 +776,12 @@ class DriverManagerApp:
                 "Выделите драйверы в списке (Ctrl+клик / Shift+клик).")
             return
 
-        oem_sel = [iid for iid in sel
-                   if self._tree.item(iid, "values")[0] == "OEM"]
-        if not oem_sel:
+        exportable = [iid for iid in sel
+                      if self._tree.item(iid, "values")[0] in ("OEM", "Принтер")]
+        if not exportable:
             messagebox.showwarning(
-                "Только OEM",
-                "Экспорт работает только для OEM-драйверов.\n"
+                "Только OEM и принтеры",
+                "Экспорт работает только для OEM-драйверов и драйверов принтеров.\n"
                 "Системные драйверы нельзя выгрузить отдельно.")
             return
 
@@ -697,34 +792,54 @@ class DriverManagerApp:
         self._set_status("Экспорт…")
         threading.Thread(
             target=self._export_thread,
-            args=(oem_sel, folder), daemon=True).start()
+            args=(exportable, folder), daemon=True).start()
 
     def _export_thread(self, iids: list, folder: str):
+        import shutil
         ok, fail = 0, 0
         errors: list[str] = []
         for iid in iids:
             vals = self._tree.item(iid, "values")
-            inf, name = vals[2], vals[1]
-            if not inf:
+            dtype, name, inf, path = vals[0], vals[1], vals[2], vals[7]
+            if not inf and not path:
                 fail += 1
-                errors.append(f"{name}: нет INF имени")
+                errors.append(f"{name}: нет INF")
                 continue
-            safe = re.sub(r"[^\w.-]+", "_", name)[:50] or inf
-            dest = os.path.join(folder, f"{inf.replace('.inf','')}_{safe}")
+            safe = re.sub(r"[^\w.-]+", "_", name)[:50] or inf or "driver"
+            dest = os.path.join(folder, f"{(inf or 'drv').replace('.inf','')}_{safe}")
             os.makedirs(dest, exist_ok=True)
-            try:
-                r = _run_cmd(
-                    ["pnputil.exe", "/export-driver", inf, dest],
-                    timeout=60)
-                if r.returncode == 0:
-                    ok += 1
-                else:
-                    fail += 1
-                    msg = (r.stderr or r.stdout or "").strip().splitlines()
-                    errors.append(f"{inf}: {msg[0] if msg else 'ошибка'}")
-            except Exception as exc:
+
+            exported = False
+            err_msg = "не удалось экспортировать"
+            # Try pnputil first — works for all drivers published in DriverStore
+            if inf:
+                try:
+                    r = _run_cmd(
+                        ["pnputil.exe", "/export-driver", inf, dest],
+                        timeout=60)
+                    if r.returncode == 0:
+                        ok += 1
+                        exported = True
+                    else:
+                        lines = (r.stderr or r.stdout or "").strip().splitlines()
+                        err_msg = lines[0] if lines else "pnputil error"
+                except Exception as exc:
+                    err_msg = str(exc)
+
+            # Fallback: copy DriverStore folder if path is real
+            if not exported and path and os.path.isfile(path):
+                src_dir = os.path.dirname(path)
+                if "DriverStore" in src_dir and os.path.isdir(src_dir):
+                    try:
+                        shutil.copytree(src_dir, dest, dirs_exist_ok=True)
+                        ok += 1
+                        exported = True
+                    except Exception as exc:
+                        err_msg = f"copy failed: {exc}"
+
+            if not exported:
                 fail += 1
-                errors.append(f"{inf}: {exc}")
+                errors.append(f"{inf or name}: {err_msg}")
 
         text = f"Экспортировано: {ok}\nОшибок: {fail}\n\nПапка:\n{folder}"
         if errors:
