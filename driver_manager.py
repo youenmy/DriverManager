@@ -730,16 +730,55 @@ class DriverManagerApp:
             dtype, name, inf = vals[0], vals[1], vals[2]
             try:
                 if dtype == "Принтер":
-                    # Remove printer driver via PS cmdlet
+                    # 1) Kill printers using this driver,
+                    # 2) Stop jobs on spooler,
+                    # 3) Remove-PrinterDriver,
+                    # 4) pnputil cleanup from DriverStore (if oem*.inf)
                     escaped = name.replace("'", "''")
-                    script = (f"Remove-PrinterDriver -Name '{escaped}' "
-                              f"-ErrorAction Stop; Write-Output 'OK'")
-                    out = _run_ps(script, timeout=60)
-                    if out.strip().endswith("OK"):
+                    script = f"""
+$msg = ''
+$ok = $false
+try {{
+    $driverName = '{escaped}'
+    # Remove dependent printers
+    try {{
+        Get-Printer -ErrorAction SilentlyContinue |
+            Where-Object {{ $_.DriverName -eq $driverName }} |
+            ForEach-Object {{
+                try {{ Remove-Printer -Name $_.Name -ErrorAction Stop }} catch {{}}
+            }}
+    }} catch {{}}
+    # Cancel any stuck jobs
+    try {{
+        Get-PrintJob -ErrorAction SilentlyContinue |
+            ForEach-Object {{
+                try {{ Remove-PrintJob -InputObject $_ -ErrorAction Stop }} catch {{}}
+            }}
+    }} catch {{}}
+    Start-Sleep -Milliseconds 400
+    Remove-PrinterDriver -Name $driverName -ErrorAction Stop
+    $ok = $true
+}} catch {{
+    $msg = $_.Exception.Message
+}}
+if ($ok) {{ Write-Output 'OK' }} else {{ Write-Output ('ERR|' + $msg) }}
+"""
+                    out = _run_ps(script, timeout=120)
+                    if out.strip() == "OK":
                         ok += 1
+                        # Also try to delete INF from DriverStore (best effort)
+                        if inf and re.match(r"^oem\d+\.inf$", inf, re.I):
+                            try:
+                                _run_cmd(
+                                    ["pnputil.exe", "/delete-driver", inf,
+                                     "/uninstall", "/force"],
+                                    timeout=60)
+                            except Exception:
+                                pass
                     else:
                         fail += 1
-                        errors.append(f"{name}: {out.splitlines()[0] if out else 'ошибка'}")
+                        err = out.replace("ERR|", "").strip() or "неизвестная ошибка"
+                        errors.append(f"{name}: {err}")
                 else:
                     if not inf:
                         fail += 1
