@@ -1,76 +1,81 @@
 # Driver Manager
 
-Portable Windows utility for listing, exporting, and installing device drivers.
-Designed for one simple workflow: **pull drivers from one PC, install them on another.**
+Портативная утилита для Windows: просмотр, экспорт и установка драйверов устройств.
+Задача простая — **вытащить драйверы с одного компьютера и установить на другой.**
 
 ![Driver Manager](icon.png)
 
 ---
 
-## Features
+## Возможности
 
-- **List all drivers** installed in Windows, with real device names, versions, dates, providers, and file paths
-- **Two categories** with toggleable filters:
-  - **OEM** — third-party drivers (`oem*.inf`) stored in the Driver Store
-  - **System** — kernel-mode drivers from `Win32_SystemDriver`
-- **Path column** shows the actual driver store folder (OEM) or `.sys` file path (system)
-- **File-manager style multi-select** — `Click` / `Ctrl+Click` / `Shift+Click` / `Ctrl+A`
-- **Right-click context menu**:
-  - 📤 Export selected drivers…
-  - 📁 Open driver location in Explorer
-  - 🗑 Uninstall driver (OEM only)
-- **Live search** across name, INF, version, provider, class, path
-- **Portable single-file EXE** — no install, no dependencies, no admin required to browse
-- Auto-elevation via UAC when installing / uninstalling drivers
+- **Список всех драйверов** с реальными именами устройств, версиями, датами, поставщиками и путями к файлам
+- **Две категории** с переключаемыми фильтрами:
+  - **OEM** — сторонние драйверы (`oem*.inf`) в Driver Store
+  - **Системные** — драйверы ядра из `Win32_SystemDriver`
+- **Колонка «Путь»** показывает реальную папку драйвера в DriverStore (для OEM) или путь к `.sys` (для системных)
+- **Множественное выделение как в проводнике** — `Клик` / `Ctrl+Клик` / `Shift+Клик` / `Ctrl+A`
+- **Контекстное меню** (правая кнопка):
+  - 📤 Экспортировать выбранные…
+  - 📁 Открыть расположение в проводнике
+  - 🗑 Удалить драйвер (только OEM)
+- **Поиск в реальном времени** по имени, INF, версии, поставщику, классу и пути
+- **Портативный одиночный EXE** — без установки, без зависимостей, просмотр без прав администратора
+- Автоматический запрос UAC при установке или удалении драйверов
 
-## Download
+## Скачать
 
-Grab the latest EXE from [Releases](https://github.com/youenmy/DriverManager/releases/latest):
+Последний EXE в разделе [Releases](https://github.com/youenmy/DriverManager/releases/latest):
 
-**→ [DriverManager.exe](https://github.com/youenmy/DriverManager/releases/latest/download/DriverManager.exe)** (~10 MB)
+**→ [DriverManager.exe](https://github.com/youenmy/DriverManager/releases/latest/download/DriverManager.exe)** (~10 МБ)
 
-Just double-click. Accept the UAC prompt if you intend to install or uninstall drivers.
+Просто запусти двойным кликом. Согласись на UAC, если собираешься устанавливать или удалять драйверы.
 
-## Usage
+## Как пользоваться
 
-### Export drivers from PC A
+### Экспорт драйверов с ПК A
 
-1. Launch `DriverManager.exe`
-2. Filter to **OEM** in the top strip (only OEM drivers can be exported)
-3. Select the drivers you need (`Ctrl+Click` for multiple, `Shift+Click` for range, `Ctrl+A` for all)
-4. Click **📤 Экспорт выбранных** or right-click → **Экспортировать…**
-5. Choose a destination folder (e.g. `D:\MyDrivers`)
-6. Done — each driver goes into its own subfolder with the `.inf`, `.sys` and related files
+1. Запусти `DriverManager.exe`
+2. В верхней строке оставь только фильтр **OEM** (системные нельзя выгрузить)
+3. Выдели нужные драйверы (`Ctrl+Клик` — добавить, `Shift+Клик` — диапазон, `Ctrl+A` — все)
+4. Нажми **📤 Экспорт выбранных** или правой кнопкой → **Экспортировать…**
+5. Укажи папку назначения (например `D:\MyDrivers`)
+6. Готово — каждый драйвер сохраняется в свою подпапку с `.inf`, `.sys` и сопутствующими файлами
 
-### Import drivers on PC B
+### Импорт драйверов на ПК Б
 
-1. Launch `DriverManager.exe` (UAC will ask for admin rights)
-2. Click **📥 Импорт из папки**
-3. Point it at the folder containing `.inf` files (recursively scanned)
-4. Confirm — all found drivers are installed with `pnputil /add-driver /install`
+1. Запусти `DriverManager.exe` (UAC попросит права администратора)
+2. Нажми **📥 Импорт из папки**
+3. Укажи папку с `.inf` файлами (сканируется рекурсивно)
+4. Подтверди — все найденные драйверы будут установлены через `pnputil /add-driver /install`
 
-### Uninstall an OEM driver
+### Удалить OEM-драйвер
 
-1. Select the OEM driver(s)
-2. Right-click → **🗑 Удалить драйвер**
-3. Confirm — runs `pnputil /delete-driver <inf> /uninstall /force`
+1. Выдели нужный драйвер (или несколько)
+2. Правая кнопка → **🗑 Удалить драйвер**
+3. Подтверди — выполнится `pnputil /delete-driver <inf> /uninstall /force`
 
-## Under the hood
+### Перейти в каталог драйвера
 
-| Operation | Tool |
+1. Клик правой кнопкой по строке → **📁 Открыть расположение**
+2. Откроется проводник с выделенным файлом драйвера
+
+## Что под капотом
+
+| Действие | Инструмент |
 |---|---|
-| Enumerate OEM drivers | `Get-CimInstance Win32_PnPSignedDriver` + `pnputil /enum-drivers` |
-| Enumerate system drivers | `Get-CimInstance Win32_SystemDriver` |
-| Export | `pnputil /export-driver <inf> <dest>` |
-| Import | `pnputil /add-driver <inf> /install` |
-| Uninstall | `pnputil /delete-driver <inf> /uninstall /force` |
-| Open location | `explorer.exe /select,<path>` |
+| Список OEM-драйверов | `Get-CimInstance Win32_PnPSignedDriver` + `pnputil /enum-drivers` |
+| Список системных драйверов | `Get-CimInstance Win32_SystemDriver` |
+| Экспорт | `pnputil /export-driver <inf> <папка>` |
+| Импорт | `pnputil /add-driver <inf> /install` |
+| Удаление | `pnputil /delete-driver <inf> /uninstall /force` |
+| Открыть расположение | `explorer.exe /select,<путь>` |
 
-GUI is plain Python `tkinter` + `ttk` (Vista theme) — no extra runtime deps.
+Интерфейс — обычный Python `tkinter` + `ttk` (тема Vista). Никаких дополнительных зависимостей в рантайме.
 
-## Build from source
+## Сборка из исходников
 
-Requires Python 3.10+ and PyInstaller.
+Нужен Python 3.10+ и PyInstaller.
 
 ```bat
 pip install pyinstaller pillow
@@ -80,29 +85,41 @@ pyinstaller --onefile --windowed --name DriverManager ^
     --uac-admin driver_manager.py
 ```
 
-Or just run the included [build_exe.bat](build_exe.bat).
+Или просто запусти [build_exe.bat](build_exe.bat) — он сам всё поставит и соберёт.
 
-The resulting `dist\DriverManager.exe` is fully portable — copy it anywhere.
+Итоговый `dist\DriverManager.exe` полностью портативный, копируй куда угодно.
 
-## Repo layout
+## Структура репо
 
 ```
-driver_manager.py   — main application (single file)
-make_icon.py        — regenerates icon.ico with Pillow
-build_exe.bat       — one-click PyInstaller build script
-icon.ico / icon.png — app icon
+driver_manager.py   — основное приложение (один файл)
+make_icon.py        — генератор icon.ico через Pillow
+build_exe.bat       — скрипт сборки в один клик
+icon.ico / icon.png — иконка приложения
 ```
 
-## Notes
+## Примечания
 
-- Only **OEM** drivers can be exported, uninstalled, or re-installed. Windows system
-  drivers are tied to the OS and shouldn't be extracted.
-- If the list is empty on first open: click **↻ Обновить** — some WMI queries need a
-  warm-up call.
-- Some OEM drivers (especially those with additional installer packages like NVIDIA
-  GeForce Experience) may require the original vendor installer on the target PC to
-  be fully functional; `pnputil` only transfers the kernel driver itself.
+- Экспортировать, устанавливать и удалять можно **только OEM-драйверы**. Системные драйверы
+  Windows привязаны к ОС и их нельзя вытащить отдельно.
+- Если список пустой при первом запуске — нажми **↻ Обновить**. Некоторые WMI-запросы требуют
+  «прогревочного» вызова.
+- Часть OEM-драйверов (особенно с дополнительными установщиками вроде NVIDIA GeForce Experience)
+  может требовать оригинальный инсталлятор производителя на целевом ПК для полной
+  функциональности. `pnputil` переносит только сам драйвер ядра.
+- Для установки и удаления драйверов нужны права администратора. При запуске приложение
+  попросит их через UAC.
 
-## License
+## Горячие клавиши
+
+| Клавиша | Действие |
+|---|---|
+| `Ctrl+A` | Выделить все драйверы в списке |
+| `Ctrl+Клик` | Добавить / убрать драйвер из выделения |
+| `Shift+Клик` | Выделить диапазон |
+| `Enter` | Открыть расположение выделенного драйвера |
+| `Delete` | Удалить выделенные OEM-драйверы |
+
+## Лицензия
 
 MIT
