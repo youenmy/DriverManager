@@ -12,6 +12,7 @@ import sys
 import threading
 import ctypes
 import re
+from datetime import datetime, timedelta
 
 # ─── Admin helpers ─────────────────────────────────────────────────────────
 
@@ -65,6 +66,23 @@ def _run_cmd(args: list[str], encoding: str = "cp866", timeout: int = 60):
 
 
 # ─── Driver data collectors ────────────────────────────────────────────────
+
+def _file_install_dt(path: str):
+    """Best-effort 'when was this added' timestamp: Windows file creation time.
+
+    pnputil re-creates oemN.inf / copies driver files at install time, so the
+    creation timestamp closely tracks the actual install/update moment.
+    """
+    try:
+        if path and os.path.isfile(path):
+            return datetime.fromtimestamp(os.path.getctime(path))
+    except Exception:
+        pass
+    return None
+
+
+def _fmt_dt(dt) -> str:
+    return dt.strftime("%d.%m.%Y %H:%M") if dt else ""
 
 def _driver_store_paths() -> dict:
     """Map InfName → driver-store folder via `pnputil /enum-drivers`."""
@@ -131,7 +149,9 @@ try {
             date_raw = date_raw.get("DateTime", "") or ""
         m = re.search(r"(\d{4})(\d{2})(\d{2})", str(date_raw))
         date_str = f"{m.group(3)}.{m.group(2)}.{m.group(1)}" if m else ""
-        path = store.get(inf) or (f"C:\\Windows\\INF\\{inf}" if inf else "")
+        inf_sys_path = f"C:\\Windows\\INF\\{inf}" if inf else ""
+        path = store.get(inf) or inf_sys_path
+        install_dt = _file_install_dt(inf_sys_path) or _file_install_dt(path)
         out.append({
             "driver_type": "OEM",
             "name": (r.get("DeviceName") or "").strip() or inf,
@@ -141,6 +161,8 @@ try {
             "provider": (r.get("Manufacturer") or "").strip(),
             "class": (r.get("DeviceClass") or "").strip(),
             "path": path,
+            "install_dt": install_dt,
+            "added": _fmt_dt(install_dt),
         })
     return out
 
@@ -191,6 +213,7 @@ try {
             continue
         seen.add(key)
 
+        install_dt = _file_install_dt(inf_path)
         out.append({
             "driver_type": "Принтер",
             "name": name,
@@ -200,6 +223,8 @@ try {
             "provider": (r.get("Manufacturer") or "").strip(),
             "class": f"Printer ({env})" if env else "Printer",
             "path": inf_path,
+            "install_dt": install_dt,
+            "added": _fmt_dt(install_dt),
         })
     return out
 
@@ -230,6 +255,7 @@ try {
         if not isinstance(r, dict):
             continue
         path = (r.get("PathName") or "").strip().replace("\\??\\", "")
+        install_dt = _file_install_dt(os.path.expandvars(path)) if path else None
         out.append({
             "driver_type": "Системный",
             "name": (r.get("DisplayName") or r.get("Name") or "").strip(),
@@ -239,6 +265,8 @@ try {
             "provider": "",
             "class": (r.get("ServiceType") or "").strip(),
             "path": path,
+            "install_dt": install_dt,
+            "added": _fmt_dt(install_dt),
         })
     return out
 
@@ -277,15 +305,26 @@ ROW_PRN_ALT = "#ffffff"
 class DriverManagerApp:
 
     COL_DEFS = [
+        ("chk",      "☐",              34,  30,  False),
         ("type",     "Тип",            90,  70,  False),
         ("name",     "Имя устройства", 240, 140, True),
         ("inf",      "INF / Модуль",   130, 90,  False),
         ("version",  "Версия",         115, 80,  False),
-        ("date",     "Дата",           90,  70,  False),
+        ("date",     "Дата выпуска",   95,  70,  False),
+        ("added",    "Добавлен",       130, 100, False),
         ("provider", "Поставщик",      170, 90,  False),
         ("class",    "Класс",          110, 70,  False),
         ("path",     "Путь к файлам",  260, 140, True),
     ]
+
+    TIME_ALL = "Все время"
+    TIME_WINDOWS = {
+        TIME_ALL: None,
+        "За последний час": timedelta(hours=1),
+        "За последние 24 часа": timedelta(hours=24),
+        "За последние 7 дней": timedelta(days=7),
+        "За последние 30 дней": timedelta(days=30),
+    }
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -442,6 +481,19 @@ class DriverManagerApp:
         ttk.Separator(fstrip, orient=tk.VERTICAL).pack(
             side=tk.LEFT, fill=tk.Y, padx=10, pady=2)
 
+        ttk.Label(fstrip, text="Добавлены:", style="Muted.TLabel").pack(
+            side=tk.LEFT, padx=(0, 6))
+        self._time_filter = tk.StringVar(value=self.TIME_ALL)
+        time_combo = ttk.Combobox(
+            fstrip, textvariable=self._time_filter,
+            values=list(self.TIME_WINDOWS.keys()),
+            state="readonly", width=17)
+        time_combo.pack(side=tk.LEFT)
+        time_combo.bind("<<ComboboxSelected>>", lambda _e: self._filter())
+
+        ttk.Separator(fstrip, orient=tk.VERTICAL).pack(
+            side=tk.LEFT, fill=tk.Y, padx=10, pady=2)
+
         ttk.Label(fstrip, text="🔍", style="Muted.TLabel").pack(side=tk.LEFT)
         self._search_var = tk.StringVar()
         self._search_var.trace_add("write", lambda *_: self._filter())
@@ -465,9 +517,11 @@ class DriverManagerApp:
             selectmode="extended",
         )
         for cid, heading, width, minw, stretch in self.COL_DEFS:
-            self._tree.heading(cid, text=heading,
-                               command=lambda c=cid: self._sort_by(c))
-            self._tree.column(cid, width=width, minwidth=minw, stretch=stretch)
+            cmd = self._toggle_select_all if cid == "chk" else \
+                (lambda c=cid: self._sort_by(c))
+            self._tree.heading(cid, text=heading, command=cmd)
+            self._tree.column(cid, width=width, minwidth=minw, stretch=stretch,
+                              anchor=("center" if cid == "chk" else "w"))
 
         vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL,
                             command=self._tree.yview)
@@ -502,6 +556,7 @@ class DriverManagerApp:
         self._ctx.add_command(label="  🗑  Удалить драйвер",
                               command=self._ctx_delete)
 
+        self._tree.bind("<Button-1>", self._on_tree_click)
         self._tree.bind("<Button-3>", self._on_right_click)
         self._tree.bind("<<TreeviewSelect>>", self._on_select_change)
         self._tree.bind("<Control-a>", self._on_ctrl_a)
@@ -529,16 +584,21 @@ class DriverManagerApp:
         self._set_status("Загрузка списка драйверов… это может занять до 30 секунд")
         self._tree.delete(*self._tree.get_children())
         self._counts_lbl.configure(text="")
+        self._show_progress_dialog()
         threading.Thread(target=self._load_thread, daemon=True).start()
 
     def _load_thread(self):
+        self.root.after(0, lambda: self._set_progress_stage("Считываем OEM-драйверы…"))
         oem = get_oem_drivers()
+        self.root.after(0, lambda: self._set_progress_stage("Считываем системные драйверы…"))
         sys_d = get_system_drivers()
+        self.root.after(0, lambda: self._set_progress_stage("Считываем драйверы принтеров…"))
         prn = get_printer_drivers()
 
         # Retry once if everything is empty — WMI first-call hiccup
         if not oem and not sys_d and not prn:
             import time
+            self.root.after(0, lambda: self._set_progress_stage("Повторная попытка чтения…"))
             time.sleep(0.4)
             oem = get_oem_drivers()
             sys_d = get_system_drivers()
@@ -549,7 +609,51 @@ class DriverManagerApp:
 
     def _populate_done(self):
         self._loading = False
+        self._close_progress_dialog()
         self._populate()
+
+    # ── Progress dialog ───────────────────────────────────────────────────
+
+    def _show_progress_dialog(self):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Загрузка драйверов")
+        dlg.configure(bg=CARD)
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        dlg.protocol("WM_DELETE_WINDOW", lambda: None)  # not closable manually
+
+        w, h = 360, 130
+        self.root.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - w) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - h) // 2
+        dlg.geometry(f"{w}x{h}+{max(x, 0)}+{max(y, 0)}")
+
+        ttk.Label(dlg, text="Пожалуйста, подождите…",
+                  style="Card.TLabel",
+                  font=("Segoe UI Semibold", 10)).pack(pady=(18, 6))
+
+        self._progress_stage_var = tk.StringVar(value="Запуск…")
+        ttk.Label(dlg, textvariable=self._progress_stage_var,
+                  style="Card.TLabel").pack(pady=(0, 10))
+
+        bar = ttk.Progressbar(dlg, mode="indeterminate", length=280)
+        bar.pack(pady=(0, 10))
+        bar.start(12)
+
+        dlg.grab_set()
+        self._progress_dlg = dlg
+
+    def _set_progress_stage(self, text: str):
+        var = getattr(self, "_progress_stage_var", None)
+        if var:
+            var.set(text)
+
+    def _close_progress_dialog(self):
+        dlg = getattr(self, "_progress_dlg", None)
+        if dlg:
+            dlg.grab_release()
+            dlg.destroy()
+            self._progress_dlg = None
 
     # ── Populate / filter ──────────────────────────────────────────────────
 
@@ -560,6 +664,10 @@ class DriverManagerApp:
         show_sys = self._show_sys.get()
 
         show_prn = self._show_prn.get()
+
+        window = self.TIME_WINDOWS.get(self._time_filter.get())
+        cutoff = datetime.now() - window if window else None
+
         shown = 0
         oem_i = sys_i = prn_i = 0
         for d in self._all_drivers:
@@ -570,6 +678,11 @@ class DriverManagerApp:
                 continue
             if dtype == "Принтер" and not show_prn:
                 continue
+
+            if cutoff is not None:
+                install_dt = d.get("install_dt")
+                if not install_dt or install_dt < cutoff:
+                    continue
 
             hay = " ".join(str(d.get(k, "")) for k in
                            ("name", "inf", "version", "provider", "class", "path")).lower()
@@ -587,11 +700,13 @@ class DriverManagerApp:
                 sys_i += 1
 
             self._tree.insert("", "end", values=(
+                "☐",
                 dtype,
                 d.get("name", ""),
                 d.get("inf", ""),
                 d.get("version", ""),
                 d.get("date", ""),
+                d.get("added", ""),
                 d.get("provider", ""),
                 d.get("class", ""),
                 d.get("path", ""),
@@ -619,23 +734,66 @@ class DriverManagerApp:
         n = len(self._tree.selection())
         self._sel_lbl.configure(
             text=f"Выделено: {n}" if n else "")
+        self._refresh_checkboxes()
 
     def _on_ctrl_a(self, _event=None):
         self._tree.selection_set(self._tree.get_children())
         return "break"
 
+    def _on_tree_click(self, event):
+        """Clicking the checkbox cell toggles that row's selection without
+        clearing the rest — an alternative to Ctrl/Shift multi-select."""
+        if self._tree.identify_region(event.x, event.y) != "cell":
+            return
+        if self._tree.identify_column(event.x) != "#1":
+            return
+        iid = self._tree.identify_row(event.y)
+        if not iid:
+            return
+        self._tree.selection_toggle(iid)
+        return "break"
+
+    def _toggle_select_all(self):
+        all_iids = self._tree.get_children()
+        if not all_iids:
+            return
+        if len(self._tree.selection()) == len(all_iids):
+            self._tree.selection_remove(*all_iids)
+        else:
+            self._tree.selection_set(all_iids)
+
+    def _refresh_checkboxes(self):
+        sel = set(self._tree.selection())
+        for iid in self._tree.get_children():
+            self._tree.set(iid, "chk", "☑" if iid in sel else "☐")
+
     def _select_all_oem(self):
         oem = [iid for iid in self._tree.get_children()
-               if self._tree.item(iid, "values")[0] == "OEM"]
+               if self._tree.set(iid, "type") == "OEM"]
         self._tree.selection_set(oem)
+
+    _DATE_COL_FMT = {"date": "%d.%m.%Y", "added": "%d.%m.%Y %H:%M"}
 
     def _sort_by(self, col: str):
         reverse = getattr(self, "_sort_rev", {}).get(col, False)
-        data = [(self._tree.set(iid, col), iid)
-                for iid in self._tree.get_children()]
-        data.sort(key=lambda x: x[0].lower(), reverse=reverse)
-        for idx, (_, iid) in enumerate(data):
+        children = list(self._tree.get_children())
+
+        fmt = self._DATE_COL_FMT.get(col)
+        if fmt:
+            def keyfunc(iid):
+                raw = self._tree.set(iid, col)
+                try:
+                    return datetime.strptime(raw, fmt)
+                except ValueError:
+                    return datetime.min
+        else:
+            def keyfunc(iid):
+                return self._tree.set(iid, col).lower()
+
+        children.sort(key=keyfunc, reverse=reverse)
+        for idx, iid in enumerate(children):
             self._tree.move(iid, "", idx)
+
         rev = getattr(self, "_sort_rev", {})
         rev[col] = not reverse
         self._sort_rev = rev
@@ -658,8 +816,7 @@ class DriverManagerApp:
         if not sel:
             return
         # Take first selected row
-        vals = self._tree.item(sel[0], "values")
-        path = vals[7]  # path column
+        path = self._tree.set(sel[0], "path")
         if not path:
             messagebox.showinfo("Путь не найден",
                                 "Для этого драйвера путь недоступен.")
@@ -687,7 +844,7 @@ class DriverManagerApp:
             return
 
         deletable = [iid for iid in sel
-                     if self._tree.item(iid, "values")[0] in ("OEM", "Принтер")]
+                     if self._tree.set(iid, "type") in ("OEM", "Принтер")]
         non_del = len(sel) - len(deletable)
 
         if not deletable:
@@ -705,7 +862,7 @@ class DriverManagerApp:
                 relaunch_as_admin()
             return
 
-        names = "\n".join("• " + self._tree.item(i, "values")[1]
+        names = "\n".join("• " + self._tree.set(i, "name")
                           for i in deletable[:8])
         if len(deletable) > 8:
             names += f"\n… и ещё {len(deletable) - 8}"
@@ -726,8 +883,9 @@ class DriverManagerApp:
         ok, fail = 0, 0
         errors: list[str] = []
         for iid in iids:
-            vals = self._tree.item(iid, "values")
-            dtype, name, inf = vals[0], vals[1], vals[2]
+            dtype = self._tree.set(iid, "type")
+            name = self._tree.set(iid, "name")
+            inf = self._tree.set(iid, "inf")
             try:
                 if dtype == "Принтер":
                     # 1) Kill printers using this driver,
@@ -816,7 +974,7 @@ if ($ok) {{ Write-Output 'OK' }} else {{ Write-Output ('ERR|' + $msg) }}
             return
 
         exportable = [iid for iid in sel
-                      if self._tree.item(iid, "values")[0] in ("OEM", "Принтер")]
+                      if self._tree.set(iid, "type") in ("OEM", "Принтер")]
         if not exportable:
             messagebox.showwarning(
                 "Только OEM и принтеры",
@@ -838,8 +996,10 @@ if ($ok) {{ Write-Output 'OK' }} else {{ Write-Output ('ERR|' + $msg) }}
         ok, fail = 0, 0
         errors: list[str] = []
         for iid in iids:
-            vals = self._tree.item(iid, "values")
-            dtype, name, inf, path = vals[0], vals[1], vals[2], vals[7]
+            dtype = self._tree.set(iid, "type")
+            name = self._tree.set(iid, "name")
+            inf = self._tree.set(iid, "inf")
+            path = self._tree.set(iid, "path")
             if not inf and not path:
                 fail += 1
                 errors.append(f"{name}: нет INF")
