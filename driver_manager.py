@@ -12,7 +12,12 @@ import sys
 import threading
 import ctypes
 import re
+import webbrowser
 from datetime import datetime, timedelta
+
+APP_VERSION = "1.3.0"
+AUTHOR = "youenmy"
+GITHUB_URL = "https://github.com/youenmy"
 
 # ─── Admin helpers ─────────────────────────────────────────────────────────
 
@@ -328,7 +333,7 @@ class DriverManagerApp:
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Driver Manager — Управление драйверами Windows")
+        self.root.title(f"Driver Manager v{APP_VERSION} — Управление драйверами Windows")
         self.root.geometry("1240x720")
         self.root.minsize(900, 500)
         self.root.configure(bg=BG)
@@ -574,6 +579,18 @@ class DriverManagerApp:
         self._sel_lbl = tk.Label(statusbar, text="", bg="#e2e8f0", fg=MUTED,
                                  font=("Segoe UI", 9), padx=10)
         self._sel_lbl.pack(side=tk.RIGHT)
+
+        credit_link = tk.Label(statusbar, text="github.com/youenmy",
+                               bg="#e2e8f0", fg=ACCENT,
+                               font=("Segoe UI Semibold", 9), cursor="hand2")
+        credit_link.pack(side=tk.RIGHT, padx=(0, 10))
+        credit_link.bind("<Button-1>", lambda _e: webbrowser.open(GITHUB_URL))
+
+        credit_text = tk.Label(
+            statusbar,
+            text=f"Driver Manager v{APP_VERSION}  ·  автор: {AUTHOR}  ·",
+            bg="#e2e8f0", fg=MUTED, font=("Segoe UI", 9))
+        credit_text.pack(side=tk.RIGHT)
 
     # ── Loading ───────────────────────────────────────────────────────────
 

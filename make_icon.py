@@ -4,7 +4,12 @@ from PIL import Image, ImageDraw, ImageFilter
 
 
 def make_icon(size: int = 512) -> Image.Image:
-    """Draw a modern gear-on-chip icon with blue gradient background."""
+    """Draw a microchip icon (die + pins) with blue gradient background.
+
+    Chosen for legibility at small sizes (16-32px taskbar/tray) — bold,
+    blocky shapes hold up better than fine serrated edges (e.g. a gear),
+    which blur into a fuzzy blob at those resolutions.
+    """
     # Supersample for smooth edges
     ss = 2
     w = size * ss
@@ -13,7 +18,6 @@ def make_icon(size: int = 512) -> Image.Image:
 
     # ── Rounded-square background with vertical gradient ──────────────────
     bg = Image.new("RGBA", (w, w), (0, 0, 0, 0))
-    bd = ImageDraw.Draw(bg)
     pad = int(w * 0.03)
     radius = int(w * 0.22)
 
@@ -45,41 +49,54 @@ def make_icon(size: int = 512) -> Image.Image:
     bg.alpha_composite(hl)
     img.alpha_composite(bg)
 
-    # ── Gear (white) ──────────────────────────────────────────────────────
+    # ── Chip pins (white stubs on all 4 sides) ─────────────────────────────
     cx, cy = w / 2, w / 2
-    r_out = w * 0.34
-    r_in = w * 0.27
-    teeth = 10
+    die = w * 0.30                     # half-size of the chip body
+    pin_len = w * 0.075
+    pin_w = w * 0.045
+    pin_gap = w * 0.145
 
-    pts = []
-    seg = 2 * math.pi / (teeth * 4)
-    for i in range(teeth * 4):
-        angle = i * seg - math.pi / 2
-        r = r_out if (i % 4) in (0, 1) else r_in
-        pts.append((cx + r * math.cos(angle), cy + r * math.sin(angle)))
+    for dx in (-pin_gap, 0, pin_gap):
+        for sign_x, sign_y in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+            if sign_x == 0:
+                x0 = cx + dx - pin_w / 2
+                x1 = cx + dx + pin_w / 2
+                y0 = cy + sign_y * die
+                y1 = cy + sign_y * (die + pin_len)
+            else:
+                x0 = cx + sign_x * die
+                x1 = cx + sign_x * (die + pin_len)
+                y0 = cy + dx - pin_w / 2
+                y1 = cy + dx + pin_w / 2
+            xs, ys = sorted((x0, x1)), sorted((y0, y1))
+            draw.rectangle((xs[0], ys[0], xs[1], ys[1]), fill=(255, 255, 255, 255))
 
-    # Shadow behind gear
+    # ── Chip body (die) ─────────────────────────────────────────────────────
     shadow = Image.new("RGBA", (w, w), (0, 0, 0, 0))
     sdraw = ImageDraw.Draw(shadow)
-    sdraw.polygon(
-        [(x + w * 0.012, y + w * 0.015) for x, y in pts],
-        fill=(0, 0, 0, 110),
+    sr = w * 0.06
+    sdraw.rounded_rectangle(
+        (cx - die + w * 0.012, cy - die + w * 0.015,
+         cx + die + w * 0.012, cy + die + w * 0.015),
+        radius=sr, fill=(0, 0, 0, 110),
     )
     shadow = shadow.filter(ImageFilter.GaussianBlur(w * 0.012))
     img.alpha_composite(shadow)
 
-    draw.polygon(pts, fill=(255, 255, 255, 255))
-
-    # Center hole
-    r_hole = w * 0.11
-    draw.ellipse(
-        (cx - r_hole, cy - r_hole, cx + r_hole, cy + r_hole),
-        fill=(22, 82, 180, 255),
+    draw.rounded_rectangle(
+        (cx - die, cy - die, cx + die, cy + die),
+        radius=sr, fill=(255, 255, 255, 255),
     )
-    # Inner tiny ring
-    r_ring = w * 0.055
+
+    # Inner accent square + corner dot to read as a "die" at a glance
+    inner = die * 0.55
+    draw.rounded_rectangle(
+        (cx - inner, cy - inner, cx + inner, cy + inner),
+        radius=w * 0.025, fill=(22, 82, 180, 255),
+    )
+    r_dot = w * 0.035
     draw.ellipse(
-        (cx - r_ring, cy - r_ring, cx + r_ring, cy + r_ring),
+        (cx - r_dot, cy - r_dot, cx + r_dot, cy + r_dot),
         fill=(255, 255, 255, 255),
     )
 
